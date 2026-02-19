@@ -183,8 +183,8 @@ class ActorCritic(nn.Module):
             value: 状态价值
         """
         with torch.no_grad():
-            board_tensor = torch.FloatTensor(board).unsqueeze(0)
-            upcoming_tensor = torch.FloatTensor(upcoming).unsqueeze(0)
+            board_tensor = torch.FloatTensor(board).unsqueeze(0).to(next(self.parameters()).device)
+            upcoming_tensor = torch.FloatTensor(upcoming).unsqueeze(0).to(next(self.parameters()).device)
             
             # 创建有效动作掩码
             mask = torch.zeros(1, self.action_dim, dtype=torch.bool)
