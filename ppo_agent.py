@@ -187,7 +187,7 @@ class ActorCritic(nn.Module):
             upcoming_tensor = torch.FloatTensor(upcoming).unsqueeze(0).to(next(self.parameters()).device)
             
             # 创建有效动作掩码
-            mask = torch.zeros(1, self.action_dim, dtype=torch.bool)
+            mask = torch.zeros(1, self.action_dim, dtype=torch.bool).to(board_tensor.device)
             if len(valid_actions) > 0:
                 mask[0, valid_actions] = True
             else:
