@@ -4,3 +4,4 @@ gymnasium>=0.28.0
 pygame>=2.5.0
 matplotlib>=3.5.0
 wandb>=0.16.0
+ray>=2.0.0
