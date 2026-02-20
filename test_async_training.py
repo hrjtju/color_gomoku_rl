@@ -141,40 +141,51 @@ def test_rollout_buffer():
 
 
 def test_experience_collector():
-    """测试经验收集器"""
+    """测试经验收集器（使用 Ray Worker 本地测试）"""
     print("=" * 60)
     print("Test 4: Experience Collector")
     print("=" * 60)
     
-    from async_trainer import ExperienceCollector
-    from game_env import ColorGomokuEnv
-    
-    collector = ExperienceCollector(
-        board_size=9,
-        num_colors=7,
-        hidden_dim=128,
-        gamma=0.99,
-        gae_lambda=0.95,
-        temperature=1.0,
-        epsilon=0.1,
-        device='cpu',
-    )
-    
-    env = ColorGomokuEnv(use_shaped_reward=True)
-    
-    # 收集一个回合
-    transitions, reward, length, score = collector.collect_episode(env)
-    
-    print(f"✓ Collected 1 episode")
-    print(f"  Transitions: {len(transitions)}")
-    print(f"  Episode reward: {reward:.2f}")
-    print(f"  Episode length: {length}")
-    print(f"  Episode score: {score}")
-    
-    assert len(transitions) > 0
-    assert length > 0
-    
-    print("✓ Experience Collector test passed!\n")
+    try:
+        import ray
+        from async_trainer import SharedReplayBuffer, AsyncExperienceCollector
+        
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True)
+        
+        # 创建共享缓冲区
+        shared_buffer = SharedReplayBuffer.remote(
+            capacity=1000,
+            alpha=0.6,
+            beta_start=0.4,
+        )
+        
+        # 创建 worker
+        worker = AsyncExperienceCollector.remote(
+            shared_buffer=shared_buffer,
+            board_size=9,
+            num_colors=7,
+            hidden_dim=128,
+            gamma=0.99,
+            gae_lambda=0.95,
+            temperature=1.0,
+            epsilon=0.1,
+            worker_id=0,
+            device='cpu',
+        )
+        
+        # 收集一个回合
+        result = ray.get(worker.collect_batch.remote(num_episodes=1))
+        
+        print(f"✓ Collected 1 episode")
+        print(f"  Transitions: {result['transitions_collected']}")
+        print(f"  Episode reward: {result['avg_reward']:.2f}")
+        
+        assert result['transitions_collected'] > 0
+        print("✓ Experience Collector test passed!\n")
+        
+    except ImportError:
+        print("⚠ Ray not available, skipping Experience Collector test\n")
 
 
 def test_ray_worker():
@@ -185,13 +196,21 @@ def test_ray_worker():
     
     try:
         import ray
-        from async_trainer import RayExperienceCollector
+        from async_trainer import SharedReplayBuffer, AsyncExperienceCollector
         
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
         
+        # 创建共享缓冲区
+        shared_buffer = SharedReplayBuffer.remote(
+            capacity=1000,
+            alpha=0.6,
+            beta_start=0.4,
+        )
+        
         # 创建 worker
-        worker = RayExperienceCollector.remote(
+        worker = AsyncExperienceCollector.remote(
+            shared_buffer=shared_buffer,
             board_size=9,
             num_colors=7,
             hidden_dim=128,
@@ -200,19 +219,20 @@ def test_ray_worker():
             temperature=1.0,
             epsilon=0.1,
             worker_id=0,
+            device='cpu',
         )
         
-        # 收集经验
-        results = ray.get(worker.collect_episodes.remote(2))
+        # 批量收集经验
+        result = ray.get(worker.collect_batch.remote(num_episodes=2))
         
-        print(f"✓ Ray worker collected {len(results)} episodes")
+        print(f"✓ Ray worker collected:")
+        print(f"  Episodes: {result['episodes_collected']}")
+        print(f"  Transitions: {result['transitions_collected']}")
+        print(f"  Avg reward: {result['avg_reward']:.2f}")
         
-        total_trans = 0
-        for i, (trans, reward, length, score) in enumerate(results):
-            print(f"  Episode {i+1}: {len(trans)} transitions, reward={reward:.2f}, length={length}")
-            total_trans += len(trans)
-        
-        print(f"  Total transitions: {total_trans}")
+        # 检查缓冲区
+        buffer_stats = ray.get(shared_buffer.get_stats.remote())
+        print(f"  Buffer size: {buffer_stats['buffer_size']}")
         
         print("✓ Ray Worker test passed!\n")
         
@@ -234,7 +254,6 @@ def test_async_trainer():
         hidden_dim=128,
         lr=3e-4,
         num_workers=2,
-        episodes_per_worker=1,
         batch_size=32,
         num_epochs=2,
         buffer_capacity=10000,
@@ -244,14 +263,15 @@ def test_async_trainer():
     print(f"  Using Ray: {trainer.using_ray}")
     print(f"  Device: {trainer.device}")
     
-    # 收集经验
-    num_trans, avg_reward, avg_length, avg_score = trainer.collect_experience_async()
+    # 批量收集经验
+    collect_stats = trainer.collect_experience_async(episodes_per_worker=3)
     
-    print(f"✓ Collected {num_trans} transitions")
-    print(f"  Avg reward: {avg_reward:.2f}")
-    print(f"  Avg length: {avg_length:.1f}")
-    print(f"  Avg score: {avg_score:.2f}")
-    print(f"  Buffer size: {len(trainer.per_buffer)}")
+    print(f"✓ Collected {collect_stats['total_transitions']} transitions")
+    print(f"  Episodes: {collect_stats['total_episodes']}")
+    print(f"  Avg reward: {collect_stats['avg_reward']:.2f}")
+    
+    buffer_stats = trainer.get_buffer_stats()
+    print(f"  Buffer size: {buffer_stats.get('buffer_size', 0)}")
     
     # 训练
     print("✓ Training for 3 steps...")
@@ -294,7 +314,6 @@ def test_training_integration():
         hidden_dim=64,  # 较小的网络
         lr=3e-4,
         num_workers=2,
-        episodes_per_worker=1,
         batch_size=32,
         num_epochs=2,
         buffer_capacity=5000,
@@ -309,16 +328,16 @@ def test_training_integration():
     scores_history = []
     
     for iteration in range(3):
-        # 收集经验
-        num_trans, avg_reward, avg_length, avg_score = trainer.collect_experience_async()
-        rewards_history.append(avg_reward)
-        scores_history.append(avg_score)
+        # 批量收集经验
+        collect_stats = trainer.collect_experience_async(episodes_per_worker=2)
+        rewards_history.append(collect_stats['avg_reward'])
+        scores_history.append(collect_stats['avg_score'])
         
-        print(f"  Iter {iteration+1}: {num_trans} transitions, "
-              f"reward={avg_reward:.2f}, score={avg_score:.2f}")
+        print(f"  Iter {iteration+1}: {collect_stats['total_transitions']} transitions, "
+              f"reward={collect_stats['avg_reward']:.2f}, score={collect_stats['avg_score']:.2f}")
         
         # 训练
-        num_updates = max(1, num_trans // 500)
+        num_updates = max(1, collect_stats['total_transitions'] // 500)
         for _ in range(num_updates):
             stats = trainer.train_step()
     
